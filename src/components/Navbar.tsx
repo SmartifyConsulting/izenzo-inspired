@@ -18,6 +18,7 @@ const solutions: Item[] = [
 ]
 
 const developers: Item[] = [
+  { label: 'Live Backend Demo', href: '/live-demo', desc: 'Run the real API end-to-end' },
   { label: 'Documentation', href: '/docs', desc: 'Guides and core resources' },
   { label: 'API Reference', href: '/docs/api', desc: 'Full endpoint reference' },
   { label: 'Webhooks', href: '/docs/webhooks', desc: 'Event notifications' },

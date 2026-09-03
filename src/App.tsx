@@ -14,6 +14,7 @@ import Walkthrough from './pages/Walkthrough'
 import Auth from './pages/Auth'
 import Trust from './pages/Trust'
 import Status from './pages/Status'
+import LiveDemo from './pages/LiveDemo'
 
 export default function App() {
   return (
@@ -41,6 +42,7 @@ export default function App() {
         <Route path="/auth" element={<Auth />} />
         <Route path="/trust" element={<Trust />} />
         <Route path="/status" element={<Status />} />
+        <Route path="/live-demo" element={<LiveDemo />} />
       </Routes>
     </BrowserRouter>
   )
