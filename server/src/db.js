@@ -25,48 +25,148 @@ CREATE TABLE IF NOT EXISTS api_keys (
   revoked_at TEXT
 );
 
-CREATE TABLE IF NOT EXISTS entities (
+-- The five-part spine container. Created on the first Bid/Offer.
+CREATE TABLE IF NOT EXISTS transactions (
   id TEXT PRIMARY KEY,
   workspace_id TEXT NOT NULL,
-  legal_name TEXT NOT NULL,
-  registration_number TEXT,
-  jurisdiction TEXT,
-  kyb_status TEXT NOT NULL DEFAULT 'pending',
-  sanctions_status TEXT NOT NULL DEFAULT 'unscreened',
-  sanctions_result TEXT,
+  lifecycle TEXT NOT NULL DEFAULT 'OPEN',
+  trading_stage TEXT NOT NULL DEFAULT 'BID_OFFER',
   created_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS ubos (
+CREATE TABLE IF NOT EXISTS bid_offers (
   id TEXT PRIMARY KEY,
-  entity_id TEXT NOT NULL,
-  name TEXT NOT NULL,
-  ownership_pct REAL NOT NULL,
-  sanctions_status TEXT NOT NULL DEFAULT 'unscreened',
-  sanctions_result TEXT
+  transaction_id TEXT NOT NULL,
+  actor_person TEXT,
+  represented_org TEXT,
+  role TEXT,
+  contact TEXT,
+  subject_type TEXT,
+  subject_description TEXT,
+  commercial_json TEXT,
+  version INTEGER NOT NULL DEFAULT 1,
+  parent_id TEXT,
+  created_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS matches (
+CREATE TABLE IF NOT EXISTS other_documents (
+  id TEXT PRIMARY KEY,
+  transaction_id TEXT NOT NULL,
+  semantic_type TEXT NOT NULL, -- AUTHORITY | EVIDENCE | CONTEXT | combination
+  issuer TEXT,
+  subject TEXT,
+  extracted_facts_json TEXT,
+  content_hash TEXT NOT NULL,
+  version INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS social_news_items (
+  id TEXT PRIMARY KEY,
+  transaction_id TEXT NOT NULL,
+  source_url TEXT,
+  publisher TEXT,
+  subject_match TEXT,
+  excerpt TEXT,
+  observed_at TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS search_runs (
+  id TEXT PRIMARY KEY,
+  transaction_id TEXT NOT NULL,
+  queries_json TEXT,
+  candidates_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ai_analyses (
+  id TEXT PRIMARY KEY,
+  transaction_id TEXT NOT NULL,
+  search_run_id TEXT NOT NULL,
+  output_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS decision_sessions (
+  id TEXT PRIMARY KEY,
+  transaction_id TEXT NOT NULL,
+  ai_analysis_id TEXT NOT NULL,
+  choice_set_json TEXT,
+  status TEXT NOT NULL DEFAULT 'OPEN',
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS counterparty_sets (
+  id TEXT PRIMARY KEY,
+  transaction_id TEXT NOT NULL,
+  decision_session_id TEXT NOT NULL,
+  entities_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS choices (
+  id TEXT PRIMARY KEY,
+  transaction_id TEXT NOT NULL,
+  counterparty_set_id TEXT NOT NULL,
+  selected_entity_json TEXT NOT NULL,
+  actor TEXT,
+  reason TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS intents (
+  id TEXT PRIMARY KEY,
+  transaction_id TEXT NOT NULL,
+  choice_id TEXT NOT NULL,
+  frozen_snapshot_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS pois (
+  id TEXT PRIMARY KEY,
+  transaction_id TEXT NOT NULL,
+  intent_id TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'LOCKED', -- LOCKED -> DRAFT -> SEALED
+  token_entry_id TEXT,
+  canonical_hash TEXT,
+  sealed_at TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS wads (
+  id TEXT PRIMARY KEY,
+  transaction_id TEXT NOT NULL,
+  poi_id TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'LOCKED', -- LOCKED -> PENDING -> PASSED/FAILED
+  token_entry_id TEXT,
+  predicates_json TEXT,
+  decision TEXT,
+  decided_at TEXT,
+  created_at TEXT NOT NULL
+);
+
+-- Append-only, double-entry token ledger. Never edit a balance directly.
+CREATE TABLE IF NOT EXISTS token_entries (
   id TEXT PRIMARY KEY,
   workspace_id TEXT NOT NULL,
-  counterparty_entity_id TEXT,
-  commodity TEXT,
-  volume_mt REAL,
-  price_usd REAL,
-  incoterms TEXT,
-  status TEXT NOT NULL DEFAULT 'pending_verification',
-  gates_json TEXT NOT NULL,
-  payload_hash TEXT,
-  created_at TEXT NOT NULL,
-  settled_at TEXT
+  transaction_id TEXT,
+  gate_type TEXT NOT NULL, -- purchase | poi | wad | reversal | refund | adjustment
+  tokens INTEGER NOT NULL,
+  usd REAL NOT NULL,
+  idempotency_key TEXT,
+  created_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS evidence_files (
+-- Append-only, hash-chained Memory substrate. INSERT-only, no UPDATE/DELETE.
+CREATE TABLE IF NOT EXISTS memory_events (
   id TEXT PRIMARY KEY,
-  match_id TEXT NOT NULL,
-  filename TEXT NOT NULL,
-  sha256 TEXT NOT NULL,
-  created_at TEXT NOT NULL
+  transaction_id TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  prev_hash TEXT,
+  event_hash TEXT NOT NULL,
+  occurred_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS webhooks (
