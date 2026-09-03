@@ -1,10 +1,44 @@
 import { useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { Logo } from '../components/Logo'
 import { MeshBackground } from '../components/ui'
+import * as api from '../lib/api'
 
 export default function Auth() {
   const [mode, setMode] = useState<'signin' | 'signup'>('signin')
+  const [name, setName] = useState('')
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+  const navigate = useNavigate()
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    setError('')
+    if (mode === 'signup' && password !== confirmPassword) {
+      setError('Passwords do not match')
+      return
+    }
+    if (password.length < 8) {
+      setError('Password must be at least 8 characters')
+      return
+    }
+    setBusy(true)
+    try {
+      if (mode === 'signup') {
+        await api.signUp(name || email.split('@')[0], email, password)
+      } else {
+        await api.signIn(email, password)
+      }
+      navigate('/live-demo')
+    } catch (err: any) {
+      setError(err.message || 'Something went wrong')
+    } finally {
+      setBusy(false)
+    }
+  }
 
   return (
     <div className="relative min-h-screen flex flex-col overflow-hidden bg-card">
@@ -24,10 +58,20 @@ export default function Auth() {
           </h2>
 
           <div className="space-y-3 mb-6">
-            <button className="w-full h-11 rounded-md border border-border text-sm font-medium text-foreground hover:bg-muted transition-colors flex items-center justify-center gap-2">
+            <button
+              type="button"
+              disabled
+              title="OAuth is not implemented in this build"
+              className="w-full h-11 rounded-md border border-border text-sm font-medium text-muted-foreground/50 flex items-center justify-center gap-2 cursor-not-allowed"
+            >
               Continue with Microsoft
             </button>
-            <button className="w-full h-11 rounded-md border border-border text-sm font-medium text-foreground hover:bg-muted transition-colors flex items-center justify-center gap-2">
+            <button
+              type="button"
+              disabled
+              title="OAuth is not implemented in this build"
+              className="w-full h-11 rounded-md border border-border text-sm font-medium text-muted-foreground/50 flex items-center justify-center gap-2 cursor-not-allowed"
+            >
               Continue with Google
             </button>
           </div>
@@ -38,11 +82,32 @@ export default function Auth() {
             <div className="h-px flex-1 bg-border" />
           </div>
 
-          <form className="space-y-4">
+          {error && (
+            <div className="mb-4 rounded-md bg-red-50 border border-red-200 px-3 py-2 text-xs text-red-700">
+              {error}
+            </div>
+          )}
+
+          <form className="space-y-4" onSubmit={handleSubmit}>
+            {mode === 'signup' && (
+              <div>
+                <label className="text-xs font-medium text-muted-foreground mb-1 block">Full name</label>
+                <input
+                  type="text"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="Jane Trader"
+                  className="w-full h-11 rounded-md border border-border px-3 text-sm outline-none focus:border-emerald-brand"
+                />
+              </div>
+            )}
             <div>
               <label className="text-xs font-medium text-muted-foreground mb-1 block">Email</label>
               <input
                 type="email"
+                required
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
                 placeholder="you@institution.com"
                 className="w-full h-11 rounded-md border border-border px-3 text-sm outline-none focus:border-emerald-brand"
               />
@@ -51,13 +116,16 @@ export default function Auth() {
               <div className="flex items-center justify-between mb-1">
                 <label className="text-xs font-medium text-muted-foreground">Password</label>
                 {mode === 'signin' && (
-                  <a href="#" className="text-xs text-emerald-brand">
+                  <span className="text-xs text-muted-foreground/40" title="Password reset is not implemented in this build">
                     Forgot password?
-                  </a>
+                  </span>
                 )}
               </div>
               <input
                 type="password"
+                required
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
                 placeholder={mode === 'signin' ? '••••••••' : 'Minimum 8 characters'}
                 className="w-full h-11 rounded-md border border-border px-3 text-sm outline-none focus:border-emerald-brand"
               />
@@ -67,6 +135,9 @@ export default function Auth() {
                 <label className="text-xs font-medium text-muted-foreground mb-1 block">Confirm password</label>
                 <input
                   type="password"
+                  required
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
                   placeholder="Re-enter password"
                   className="w-full h-11 rounded-md border border-border px-3 text-sm outline-none focus:border-emerald-brand"
                 />
@@ -74,9 +145,10 @@ export default function Auth() {
             )}
             <button
               type="submit"
-              className="w-full h-11 rounded-md bg-emerald-brand text-white text-sm font-semibold hover:bg-emerald-bright transition-colors"
+              disabled={busy}
+              className="w-full h-11 rounded-md bg-emerald-brand text-white text-sm font-semibold hover:bg-emerald-bright transition-colors disabled:opacity-60"
             >
-              {mode === 'signin' ? 'Sign in' : 'Create account'}
+              {busy ? 'Please wait…' : mode === 'signin' ? 'Sign in' : 'Create account'}
             </button>
           </form>
 
@@ -84,14 +156,14 @@ export default function Auth() {
             {mode === 'signin' ? (
               <>
                 New to Izenzo?{' '}
-                <button onClick={() => setMode('signup')} className="text-emerald-brand font-medium">
+                <button onClick={() => { setMode('signup'); setError('') }} className="text-emerald-brand font-medium">
                   Create account
                 </button>
               </>
             ) : (
               <>
                 Already have an account?{' '}
-                <button onClick={() => setMode('signin')} className="text-emerald-brand font-medium">
+                <button onClick={() => { setMode('signin'); setError('') }} className="text-emerald-brand font-medium">
                   Sign in
                 </button>
               </>

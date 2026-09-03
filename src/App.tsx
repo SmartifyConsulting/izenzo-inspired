@@ -15,6 +15,7 @@ import Auth from './pages/Auth'
 import Trust from './pages/Trust'
 import Status from './pages/Status'
 import LiveDemo from './pages/LiveDemo'
+import Checkout from './pages/Checkout'
 
 export default function App() {
   return (
@@ -43,6 +44,7 @@ export default function App() {
         <Route path="/trust" element={<Trust />} />
         <Route path="/status" element={<Status />} />
         <Route path="/live-demo" element={<LiveDemo />} />
+        <Route path="/checkout/:sessionId" element={<Checkout />} />
       </Routes>
     </BrowserRouter>
   )

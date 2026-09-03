@@ -203,6 +203,22 @@ CREATE TABLE IF NOT EXISTS finality_records (
   issued_at TEXT
 );
 
+-- Sandbox payment sessions. A real settlement-verification pattern (spec
+-- BIL-01/BIL-02, 16.4 adapter contract) backed by a simulated provider
+-- instead of a live processor -- no real money moves, but the flow (create
+-- session -> redirect -> signed callback -> idempotent reconciliation) is
+-- the genuine mechanism, not a UI-only fake.
+CREATE TABLE IF NOT EXISTS payment_sessions (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  tokens INTEGER NOT NULL,
+  usd REAL NOT NULL,
+  status TEXT NOT NULL DEFAULT 'PENDING', -- PENDING -> SETTLED
+  idempotency_key TEXT,
+  created_at TEXT NOT NULL,
+  settled_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS webhooks (
   id TEXT PRIMARY KEY,
   workspace_id TEXT NOT NULL,

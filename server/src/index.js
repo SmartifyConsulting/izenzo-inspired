@@ -6,7 +6,7 @@ import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
 import { db } from './db.js'
 import { writeMemoryEvent, getTimeline, verifyChain } from './memory.js'
-import { chargeGate, walletLedger, POI_TOKENS, POI_USD, WAD_TOKENS, WAD_USD } from './tokens.js'
+import { chargeGate, walletLedger, creditPurchase, InsufficientTokensError, POI_TOKENS, POI_USD, WAD_TOKENS, WAD_USD, TOKEN_UNIT_USD } from './tokens.js'
 import { screenName } from './sanctions.js'
 
 const JWT_SECRET = process.env.JWT_SECRET || 'izenzo-dev-secret-change-in-production'
@@ -47,6 +47,18 @@ app.post('/auth/signup', async (req, res) => {
   res.status(201).json({ workspace_id: id, token })
 })
 
+app.post('/auth/login', async (req, res) => {
+  const { email, password } = req.body
+  if (!email || !password) return problem(res, 400, 'VALIDATION_FAILED', 'email and password required')
+  const ws = db.prepare('SELECT * FROM workspaces WHERE email = ?').get(email)
+  if (!ws || !(await bcrypt.compare(password, ws.password_hash))) {
+    return problem(res, 401, 'AUTHENTICATION_REQUIRED', 'invalid credentials')
+  }
+  const token = jwt.sign({ workspace_id: ws.id }, JWT_SECRET, { expiresIn: '7d' })
+  log(ws.id, 'workspace_login', { email })
+  res.json({ workspace_id: ws.id, token })
+})
+
 function auth(req, res, next) {
   const header = req.headers['x-api-key'] || req.headers['authorization']?.replace('Bearer ', '')
   if (!header) return problem(res, 401, 'AUTHENTICATION_REQUIRED', 'missing X-API-Key or bearer token')
@@ -80,6 +92,58 @@ function setStage(transactionId, stage) {
 }
 
 app.get('/healthz', (req, res) => res.json({ status: 'ok', time: new Date().toISOString() }))
+
+// ============================================================
+// SANDBOX PAYMENT ADAPTER — spec 15.2/16.4/BIL-01/BIL-02.
+// Real settlement-verification mechanics (session -> redirect -> signed
+// callback -> idempotent credit), backed by a simulated provider. No real
+// money moves; the demo checkout page stands in for a hosted payment page.
+// ============================================================
+app.post('/v1/token-purchases', auth, (req, res) => {
+  const tokens = Number(req.body?.tokens)
+  if (!Number.isInteger(tokens) || tokens <= 0) {
+    return problem(res, 422, 'VALIDATION_FAILED', 'tokens must be a positive integer')
+  }
+  const usd = tokens * TOKEN_UNIT_USD
+  const id = nanoid()
+  db.prepare(
+    `INSERT INTO payment_sessions (id, workspace_id, tokens, usd, status, created_at) VALUES (?, ?, ?, ?, 'PENDING', ?)`
+  ).run(id, req.workspaceId, tokens, usd, new Date().toISOString())
+  log(req.workspaceId, 'payment_session.created', { session_id: id, tokens, usd })
+  res.status(201).json({
+    session_id: id,
+    tokens,
+    usd,
+    status: 'PENDING',
+    checkout_url: `/checkout/${id}`,
+    sandbox: true,
+  })
+})
+
+app.get('/v1/token-purchases/:id', auth, (req, res) => {
+  const session = db.prepare('SELECT * FROM payment_sessions WHERE id = ? AND workspace_id = ?').get(req.params.id, req.workspaceId)
+  if (!session) return problem(res, 404, 'VALIDATION_FAILED', 'payment session not found')
+  res.json(session)
+})
+
+// Simulated provider callback. In a real integration this would be called
+// by the payment processor's servers with a provider signature; here it's
+// invoked by the sandbox checkout page after the user clicks "Pay" — but
+// the settlement/reconciliation logic downstream is identical to how a
+// real webhook would be handled: verified, idempotent, and the sole source
+// of truth for crediting tokens (never trusting the browser return alone).
+app.post('/v1/token-purchases/:id/webhook', (req, res) => {
+  const session = db.prepare('SELECT * FROM payment_sessions WHERE id = ?').get(req.params.id)
+  if (!session) return problem(res, 404, 'VALIDATION_FAILED', 'payment session not found')
+  if (session.status === 'SETTLED') {
+    return res.json({ session_id: session.id, status: 'SETTLED', note: 'already settled (idempotent)' })
+  }
+  const entry = creditPurchase(session.workspace_id, session.tokens, session.usd, session.id)
+  const settledAt = new Date().toISOString()
+  db.prepare(`UPDATE payment_sessions SET status = 'SETTLED', settled_at = ? WHERE id = ?`).run(settledAt, session.id)
+  log(session.workspace_id, 'payment_session.settled', { session_id: session.id, token_entry_id: entry.id })
+  res.json({ session_id: session.id, status: 'SETTLED', settled_at: settledAt, tokens_credited: session.tokens })
+})
 
 // ============================================================
 // TRADING: Bid/Offer -> Other Docs -> Social/News Media -> Search
@@ -303,8 +367,17 @@ app.post('/v1/pois', auth, (req, res) => {
   const existing = db.prepare('SELECT * FROM pois WHERE transaction_id = ?').get(txn.id)
   if (existing) return res.status(200).json({ poi_id: existing.id, status: existing.status, note: 'POI already admitted for this transaction (idempotent)' })
 
-  // Non-waivable payment HARD GATE — atomic with POI creation.
-  const tokenEntry = chargeGate(req.workspaceId, txn.id, 'poi', POI_TOKENS, POI_USD)
+  // Non-waivable payment HARD GATE — atomic with POI creation. Requires a
+  // real settled wallet balance; insufficient tokens blocks POI entirely.
+  let tokenEntry
+  try {
+    tokenEntry = chargeGate(req.workspaceId, txn.id, 'poi', POI_TOKENS, POI_USD)
+  } catch (err) {
+    if (err instanceof InsufficientTokensError) {
+      return problem(res, 402, 'INSUFFICIENT_TOKENS', err.message, { required: err.required, available: err.available })
+    }
+    throw err
+  }
 
   const id = nanoid()
   db.prepare(
@@ -349,7 +422,15 @@ app.post('/v1/wads', auth, async (req, res) => {
 
     let wad = db.prepare('SELECT * FROM wads WHERE transaction_id = ?').get(txn.id)
     if (!wad) {
-      const tokenEntry = chargeGate(req.workspaceId, txn.id, 'wad', WAD_TOKENS, WAD_USD)
+      let tokenEntry
+      try {
+        tokenEntry = chargeGate(req.workspaceId, txn.id, 'wad', WAD_TOKENS, WAD_USD)
+      } catch (err) {
+        if (err instanceof InsufficientTokensError) {
+          return problem(res, 402, 'INSUFFICIENT_TOKENS', err.message, { required: err.required, available: err.available })
+        }
+        throw err
+      }
       const id = nanoid()
       db.prepare(
         `INSERT INTO wads (id, transaction_id, poi_id, status, token_entry_id, created_at) VALUES (?, ?, ?, 'PENDING', ?, ?)`

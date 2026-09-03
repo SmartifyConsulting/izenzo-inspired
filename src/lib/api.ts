@@ -40,6 +40,43 @@ export async function ensureSession() {
   return token
 }
 
+export function isLoggedIn() {
+  return !!token
+}
+
+export function currentWorkspaceId(): string | null {
+  if (!token) return null
+  try {
+    const payload = JSON.parse(atob(token.split('.')[1]))
+    return payload.workspace_id
+  } catch {
+    return null
+  }
+}
+
+export function logout() {
+  token = null
+  localStorage.removeItem('izenzo_demo_token')
+}
+
+export async function signUp(name: string, email: string, password: string) {
+  const data = await req('/auth/signup', { method: 'POST', body: JSON.stringify({ name, email, password }) })
+  token = data.token
+  localStorage.setItem('izenzo_demo_token', token!)
+  return { workspace_id: data.workspace_id }
+}
+
+export async function signIn(email: string, password: string) {
+  const data = await req('/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) })
+  token = data.token
+  localStorage.setItem('izenzo_demo_token', token!)
+  return { workspace_id: data.workspace_id }
+}
+
+export const createTokenPurchase = (tokens: number) => req('/v1/token-purchases', { method: 'POST', body: JSON.stringify({ tokens }) })
+export const getTokenPurchase = (id: string) => req(`/v1/token-purchases/${id}`)
+export const settlePayment = (id: string) => req(`/v1/token-purchases/${id}/webhook`, { method: 'POST' })
+
 export const healthCheck = () => req('/healthz')
 
 export const createBidOffer = (payload: object) => req('/v1/bid-offers', { method: 'POST', body: JSON.stringify(payload) })

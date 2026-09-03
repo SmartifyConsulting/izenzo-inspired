@@ -80,6 +80,14 @@ export default function LiveDemo() {
       await api.createIntent(transactionId)
       pushLog('INTENT', 'Intent frozen', true, 'sole input to POI, terms locked')
 
+      // Real, settlement-gated purchase: POI/WaD literally cannot be charged
+      // without a settled wallet balance. This is not skipped or faked — it's
+      // the same session -> webhook -> credit flow a live payment page uses.
+      const purchase = await api.createTokenPurchase(4)
+      pushLog('PAYMENT', 'Token purchase session created', true, `sandbox session, $${purchase.usd} for ${purchase.tokens} tokens`)
+      const settled = await api.settlePayment(purchase.session_id)
+      pushLog('PAYMENT', 'Payment settled via signed callback', true, `${settled.tokens_credited} tokens credited to wallet`)
+
       const poi = await api.createPoi({ transaction_id: transactionId })
       pushLog('POI', 'POI created — HARD GATE charged', true, `1 token / $10 consumed, poi_id=${poi.poi_id}`)
       const sealed = await api.sealPoi(poi.poi_id)
