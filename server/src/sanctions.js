@@ -56,16 +56,24 @@ function normalize(s) {
   return s.toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim()
 }
 
+// Word-level matching only — never raw substring containment, which produces
+// false positives like "LIA" matching inside "AuRELIA" (a real bug caught
+// during testing: "Aurelia Metals Trading" falsely hit a sanctioned "LIA").
 function similarity(a, b) {
   const na = normalize(a)
   const nb = normalize(b)
   if (na === nb) return 1
-  if (na.includes(nb) || nb.includes(na)) return 0.85
-  const wordsA = new Set(na.split(' '))
-  const wordsB = new Set(nb.split(' '))
-  const overlap = [...wordsA].filter((w) => wordsB.has(w) && w.length > 2).length
-  const denom = Math.max(wordsA.size, wordsB.size)
-  return denom ? overlap / denom : 0
+  const wordsA = na.split(' ').filter((w) => w.length > 2)
+  const wordsB = nb.split(' ').filter((w) => w.length > 2)
+  if (wordsA.length === 0 || wordsB.length === 0) return 0
+  const setB = new Set(wordsB)
+  const overlap = wordsA.filter((w) => setB.has(w)).length
+  const denom = Math.max(wordsA.length, wordsB.length)
+  // Require the shorter name to be substantially covered by shared whole
+  // words, not just any overlap, to avoid matching on one common word.
+  const coverage = overlap / Math.min(wordsA.length, wordsB.length)
+  if (coverage < 0.6) return 0
+  return overlap / denom
 }
 
 export async function screenName(name) {

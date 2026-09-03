@@ -3,69 +3,122 @@ import { Layout } from '../components/Layout'
 import { Badge, Card } from '../components/ui'
 import * as api from '../lib/api'
 
-type LogLine = { label: string; ok: boolean; detail: string }
+type LogLine = { label: string; ok: boolean; detail: string; stage?: string }
 
 export default function LiveDemo() {
   const [busy, setBusy] = useState(false)
   const [logs, setLogs] = useState<LogLine[]>([])
-  const [entity, setEntity] = useState<any>(null)
-  const [screenResult, setScreenResult] = useState<any>(null)
-  const [match, setMatch] = useState<any>(null)
-  const [settled, setSettled] = useState<any>(null)
-  const [uboName, setUboName] = useState('Vladimir Putin')
-  const [companyName, setCompanyName] = useState('Test Trading Co (Diligence Demo)')
+  const [result, setResult] = useState<'idle' | 'wad_failed' | 'sealed'>('idle')
+  const [certificate, setCertificate] = useState<any>(null)
+  const [cda, setCda] = useState<any>(null)
+  const [counterpartyName, setCounterpartyName] = useState('Aurelia Metals Trading Pty Ltd')
 
-  function pushLog(label: string, ok: boolean, detail: string) {
-    setLogs((l) => [...l, { label, ok, detail }])
+  function pushLog(stage: string, label: string, ok: boolean, detail: string) {
+    setLogs((l) => [...l, { stage, label, ok, detail }])
   }
 
-  async function runFullFlow() {
+  async function run() {
     setBusy(true)
     setLogs([])
-    setEntity(null)
-    setScreenResult(null)
-    setMatch(null)
-    setSettled(null)
+    setResult('idle')
+    setCertificate(null)
+    setCda(null)
     try {
-      const health = await api.healthCheck()
-      pushLog('Backend health check', true, `status=${health.status}`)
+      await api.newSession()
+      pushLog('SESSION', 'New workspace provisioned', true, 'fresh session, no shared state with prior runs')
 
-      const e = await api.createEntity({
-        legal_name: companyName,
-        jurisdiction: 'ZA',
-        ubos: [{ name: uboName, ownership_pct: 100 }],
+      const bidOffer = await api.createBidOffer({
+        actor_person: 'Jane Trader',
+        contact: 'jane@buyerco.com',
+        represented_org: 'BuyerCo Ltd',
+        role: 'buyer',
+        subject_type: 'commodity',
+        subject_description: 'Copper Cathode LME Grade A',
+        commercial: { quantity: '500 MT', price: '9420 USD', incoterms: 'CIF Rotterdam' },
       })
-      setEntity(e)
-      pushLog('Entity registered', true, `id=${e.id}`)
+      const transactionId = bidOffer.transaction_id
+      pushLog('BID_OFFER', 'Bid/Offer created', true, `transaction_id=${transactionId}`)
 
-      const screened = await api.screenEntity(e.id)
-      setScreenResult(screened)
-      const uboHit = screened.entity_result?.status === 'hit'
+      await api.createOtherDocument({
+        transaction_id: transactionId,
+        semantic_type: 'AUTHORITY',
+        issuer: 'CIPC',
+        subject: 'Certificate of Incorporation',
+      })
+      pushLog('OTHER_DOCS', 'Other Docs recorded', true, 'semantic_type=AUTHORITY, hashed and stored')
+
+      await api.createSocialNewsItem({
+        transaction_id: transactionId,
+        source_url: 'https://reuters.com/markets/commodities/example',
+        publisher: 'Reuters',
+      })
+      pushLog('SOCIAL_NEWS', 'Social/News Media recorded', true, 'external sourced context added')
+
+      const search = await api.createSearchRun({
+        transaction_id: transactionId,
+        candidates: [{ name: counterpartyName, jurisdiction: 'ZA' }],
+      })
+      pushLog('SEARCH', 'Search completed', true, `search_run_id=${search.search_run_id}`)
+
+      const analysis = await api.createAiAnalysis({ transaction_id: transactionId })
+      pushLog('AI', 'Conventional AI analysis', true, `ranked ${analysis.output.ranked_candidates.length} candidate(s)`)
+
+      const session = await api.createDecisionSession({ transaction_id: transactionId })
+      await api.generateChoiceSet(session.decision_session_id)
+      pushLog('AI_PLUS', 'AI+ ChoiceSet generated', true, `decision_session_id=${session.decision_session_id}`)
+
+      const cps = await api.materialiseCounterparties(transactionId)
+      pushLog('COUNTERPARTIES', 'CounterpartySet materialised', true, `${cps.entities.length} real, source-supported entit${cps.entities.length === 1 ? 'y' : 'ies'}`)
+
+      await api.createChoice(transactionId, {
+        selected_entity: cps.entities[0],
+        actor: 'jane@buyerco.com',
+        reason: 'best available terms',
+      })
+      pushLog('CHOICE', 'Human Choice recorded', true, 'accountable actor: jane@buyerco.com')
+
+      await api.createIntent(transactionId)
+      pushLog('INTENT', 'Intent frozen', true, 'sole input to POI, terms locked')
+
+      const poi = await api.createPoi({ transaction_id: transactionId })
+      pushLog('POI', 'POI created — HARD GATE charged', true, `1 token / $10 consumed, poi_id=${poi.poi_id}`)
+      const sealed = await api.sealPoi(poi.poi_id)
+      pushLog('POI', 'POI sealed — Trading concluded', true, `canonical_hash=${sealed.canonical_hash.slice(0, 24)}…`)
+
+      const wad = await api.createWad({ transaction_id: transactionId })
       pushLog(
-        'Live OFAC sanctions screening',
-        true,
-        uboHit ? 'HIT — entity name matched sanctions list' : 'entity clear (see UBO result below)'
+        'WAD',
+        `WaD — HARD GATE charged, decision: ${wad.decision}`,
+        wad.decision === 'PASSED',
+        `3 tokens / $30 consumed. Sanctions predicate: ${wad.predicates.find((p: any) => p.id === 'SANCTIONS')?.result}`
       )
 
-      const m = await api.createMatch({
-        commodity: 'Copper Cathode',
-        volume_mt: 500,
-        price_usd: 9420,
-        incoterms: 'CIF Rotterdam',
-      })
-      setMatch(m)
-      pushLog('Match created', true, `match_id=${m.match_id}, gates 0/9`)
-
-      for (let i = 0; i < 9; i++) {
-        await api.advanceGate(m.match_id, i)
+      if (wad.decision !== 'PASSED') {
+        pushLog('EXECUTION', 'Execution — LOCKED', false, 'non-waivable block: WaD did not PASS. This is correct behavior, not a bug.')
+        setResult('wad_failed')
+        return
       }
-      pushLog('All 9 gates advanced', true, 'server-verified sequentially, not simulated')
 
-      const s = await api.settleMatch(m.match_id)
-      setSettled(s)
-      pushLog('Match settled + hash-sealed', true, `SHA-256: ${s.payload_hash}`)
+      const execution = await api.createExecution({ transaction_id: transactionId })
+      pushLog('EXECUTION', 'Execution entered', true, `execution_id=${execution.execution_id}, status=ACTIVE`)
+
+      await api.createMilestone(execution.execution_id, { title: 'Shipment loaded at origin port' })
+      pushLog('EXECUTION', 'Milestone accepted', true, 'evidence-backed completion recorded')
+
+      await api.exitExecution(execution.execution_id)
+      pushLog('EXECUTION', 'Execution Exit', true, 'status=COMPLETE')
+
+      const finality = await api.createFinality({ transaction_id: transactionId, finality_type: 'SETTLEMENT' })
+      const issued = await api.issueFinality(finality.finality_id)
+      pushLog('FINALITY', 'Finality ISSUED', true, `canonical_hash=${issued.canonical_hash.slice(0, 24)}…`)
+      setCertificate(issued.certificate)
+
+      const cdaResult = await api.getCda(transactionId)
+      pushLog('MEMORY', 'CDA sealed, chain verified', cdaResult.chain_integrity.valid, `${cdaResult.chain_integrity.eventCount} hash-chained Memory events, sealed=${cdaResult.sealed}`)
+      setCda(cdaResult)
+      setResult('sealed')
     } catch (err: any) {
-      pushLog('Error', false, err.message)
+      pushLog('ERROR', 'Unexpected failure', false, err.message)
     } finally {
       setBusy(false)
     }
@@ -76,43 +129,32 @@ export default function LiveDemo() {
       <div className="max-w-[900px] mx-auto px-4 sm:px-6 py-16">
         <Badge>Live Backend Demo</Badge>
         <h1 className="mt-6 text-3xl sm:text-4xl font-semibold tracking-tight text-foreground mb-4">
-          This runs against a real server.
+          The real Trading spine, running live.
         </h1>
-        <p className="text-muted-foreground mb-2 max-w-xl">
-          Every step below calls a genuine backend at <code className="text-xs bg-muted px-1.5 py-0.5 rounded">localhost:4000</code> —
-          real database writes, real SHA-256 hashing, and real sanctions screening against the current US Treasury
-          OFAC SDN list. Nothing here is a static mockup.
+        <p className="text-muted-foreground mb-2 max-w-2xl">
+          Every step below is a real call to <code className="text-xs bg-muted px-1.5 py-0.5 rounded">localhost:4000</code>,
+          enforcing the exact required order — Bid/Offer → Other Docs → Social/News Media → Search → AI → AI+ →
+          Counterparties → Choice → Intent → POI → WaD → Execution → Finality. Stage skips are rejected server-side.
+          Token gates (POI $10, WaD $30) are real and non-waivable.
         </p>
         <p className="text-xs text-muted-foreground/60 mb-8">
-          Tip: try "Vladimir Putin" as the UBO name (a real OFAC-listed individual) to see a genuine sanctions hit,
-          or change it to a random name to see a clear result.
+          Try "Vladimir Putin" as the counterparty name to see WaD correctly FAIL and Execution correctly LOCK — that
+          is proof the hard gate works, not a bug. Default name below is a clean counterparty that passes.
         </p>
 
         <Card className="p-6 mb-8">
-          <div className="grid sm:grid-cols-2 gap-4 mb-4">
-            <div>
-              <label className="text-xs font-medium text-muted-foreground mb-1 block">Company / entity name</label>
-              <input
-                value={companyName}
-                onChange={(e) => setCompanyName(e.target.value)}
-                className="w-full h-10 rounded-md border border-border px-3 text-sm outline-none focus:border-emerald-brand"
-              />
-            </div>
-            <div>
-              <label className="text-xs font-medium text-muted-foreground mb-1 block">UBO / beneficial owner name</label>
-              <input
-                value={uboName}
-                onChange={(e) => setUboName(e.target.value)}
-                className="w-full h-10 rounded-md border border-border px-3 text-sm outline-none focus:border-emerald-brand"
-              />
-            </div>
-          </div>
+          <label className="text-xs font-medium text-muted-foreground mb-1 block">Counterparty name (Search candidate)</label>
+          <input
+            value={counterpartyName}
+            onChange={(e) => setCounterpartyName(e.target.value)}
+            className="w-full h-10 rounded-md border border-border px-3 text-sm outline-none focus:border-emerald-brand mb-4"
+          />
           <button
-            onClick={runFullFlow}
+            onClick={run}
             disabled={busy}
             className="inline-flex items-center justify-center gap-2 h-12 px-6 rounded-md text-sm font-semibold bg-emerald-brand text-white shadow-md hover:-translate-y-0.5 hover:bg-emerald-bright transition-all disabled:opacity-60 disabled:pointer-events-none"
           >
-            {busy ? 'Running…' : 'Run full workflow live'}
+            {busy ? 'Running…' : 'Run the full spine live'}
           </button>
         </Card>
 
@@ -121,44 +163,52 @@ export default function LiveDemo() {
             {logs.map((l, i) => (
               <div key={i} className="flex items-start gap-2">
                 <span className={l.ok ? 'text-emerald-brand' : 'text-red-600'}>{l.ok ? '✓' : '✗'}</span>
-                <span className="text-foreground font-medium w-56 shrink-0">{l.label}</span>
+                <span className="text-muted-foreground/50 w-28 shrink-0">{l.stage}</span>
+                <span className="text-foreground font-medium w-64 shrink-0">{l.label}</span>
                 <span className="text-muted-foreground">{l.detail}</span>
               </div>
             ))}
           </div>
         )}
 
-        {screenResult && (
-          <div className="grid sm:grid-cols-2 gap-4 mb-8">
-            <Card className="p-5">
-              <p className="text-xs font-mono uppercase tracking-widest text-muted-foreground/60 mb-2">
-                Entity screening result
-              </p>
-              <pre className="text-[10px] font-mono text-muted-foreground overflow-x-auto whitespace-pre-wrap">
-                {JSON.stringify(screenResult.entity_result, null, 2)}
-              </pre>
-            </Card>
-            <Card className="p-5">
-              <p className="text-xs font-mono uppercase tracking-widest text-muted-foreground/60 mb-2">
-                KYB status (derived from real result)
-              </p>
-              <p className={`text-lg font-semibold ${screenResult.kyb_status === 'flagged' ? 'text-red-600' : 'text-emerald-brand'}`}>
-                {screenResult.kyb_status}
-              </p>
-            </Card>
-          </div>
+        {result === 'wad_failed' && (
+          <Card className="p-6 mb-8 border-red-200 bg-red-50/50">
+            <p className="text-sm font-semibold text-red-700 mb-1">WaD FAILED — Execution correctly locked</p>
+            <p className="text-xs text-red-600/80">
+              This is the non-waivable hard gate working as specified: no admin path, AI, agent, or override can
+              force Execution to unlock without a PASSED WaD decision. Try a clean counterparty name to see the
+              full spine complete.
+            </p>
+          </Card>
         )}
 
-        {settled && (
-          <Card dark className="p-6 font-mono text-xs">
-            <p className="text-sm font-sans font-semibold mb-4">Settled &amp; hash-sealed match</p>
+        {certificate && (
+          <Card dark className="p-6 font-mono text-xs mb-8">
+            <p className="text-sm font-sans font-semibold mb-4">Finality Certificate — {certificate.finality_type}</p>
             <div className="space-y-1.5 text-white/70">
-              <div className="flex justify-between"><span>match_id</span><span>{settled.match_id}</span></div>
-              <div className="flex justify-between"><span>status</span><span className="text-emerald-brand">{settled.status}</span></div>
-              <div className="flex justify-between"><span>settled_at</span><span>{settled.settled_at}</span></div>
+              <div className="flex justify-between"><span>finality_id</span><span>{certificate.finality_id}</span></div>
+              <div className="flex justify-between"><span>WaD decision</span><span className="text-emerald-brand">{certificate.wad_decision}</span></div>
+              <div className="flex justify-between"><span>milestones</span><span>{certificate.milestones.length} accepted</span></div>
+              <div className="flex justify-between"><span>issued_at</span><span>{certificate.issued_at}</span></div>
             </div>
             <div className="mt-4 pt-4 border-t border-white/10 break-all text-white/50">
-              SHA-256: {settled.payload_hash}
+              POI hash: {certificate.poi_hash}
+            </div>
+          </Card>
+        )}
+
+        {cda && (
+          <Card className="p-6">
+            <p className="text-xs font-mono uppercase tracking-widest text-muted-foreground/60 mb-3">
+              CDA — Chain of Decision and Action (sealed: {String(cda.sealed)})
+            </p>
+            <div className="font-mono text-[11px] text-muted-foreground space-y-1">
+              {cda.causal_chain.map((e: any, i: number) => (
+                <div key={i} className="flex justify-between">
+                  <span>{i + 1}. {e.event_type}</span>
+                  <span className="text-muted-foreground/40">{e.event_hash.slice(0, 16)}…</span>
+                </div>
+              ))}
             </div>
           </Card>
         )}

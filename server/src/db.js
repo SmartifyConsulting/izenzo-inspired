@@ -169,6 +169,40 @@ CREATE TABLE IF NOT EXISTS memory_events (
   occurred_at TEXT NOT NULL
 );
 
+-- Execution: ENTRY -> EXECUTION -> EXIT. Only enters from a WaD PASSED decision.
+CREATE TABLE IF NOT EXISTS executions (
+  id TEXT PRIMARY KEY,
+  transaction_id TEXT NOT NULL,
+  wad_id TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'ENTRY_REVIEW', -- ENTRY_REVIEW -> ACTIVE -> EXIT_REVIEW -> COMPLETE
+  baseline_json TEXT,
+  created_at TEXT NOT NULL,
+  completed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS milestones (
+  id TEXT PRIMARY KEY,
+  execution_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'AVAILABLE', -- AVAILABLE -> SUBMITTED -> ACCEPTED
+  evidence_hash TEXT,
+  created_at TEXT NOT NULL,
+  accepted_at TEXT
+);
+
+-- Finality: terminal record. Cannot be issued while Execution is incomplete.
+CREATE TABLE IF NOT EXISTS finality_records (
+  id TEXT PRIMARY KEY,
+  transaction_id TEXT NOT NULL,
+  execution_id TEXT NOT NULL,
+  finality_type TEXT NOT NULL, -- PAYMENT | SETTLEMENT | HANDOVER_DELIVERY | SYNTHETIC | OTHER
+  status TEXT NOT NULL DEFAULT 'DRAFT', -- DRAFT -> VALIDATION -> ACCEPTED -> ISSUED
+  canonical_hash TEXT,
+  certificate_json TEXT,
+  created_at TEXT NOT NULL,
+  issued_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS webhooks (
   id TEXT PRIMARY KEY,
   workspace_id TEXT NOT NULL,

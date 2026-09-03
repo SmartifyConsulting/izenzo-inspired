@@ -388,6 +388,131 @@ app.post('/v1/wads', auth, async (req, res) => {
   })
 })
 
+// ============================================================
+// EXECUTION — ENTRY -> EXECUTION -> EXIT.
+// Entry requires a current WaD PASSED decision (spec EXE-01). Locked otherwise.
+// ============================================================
+app.post('/v1/executions', auth, (req, res) => {
+  const txn = getTxn(req, res)
+  if (!txn) return
+  const wad = db.prepare('SELECT * FROM wads WHERE transaction_id = ?').get(txn.id)
+  if (!wad || wad.decision !== 'PASSED') {
+    return problem(res, 409, 'NON_WAIVABLE_BLOCK', 'Execution is locked: current WaD decision is not PASSED', {
+      wad_decision: wad ? wad.decision : null,
+    })
+  }
+  const existing = db.prepare('SELECT * FROM executions WHERE transaction_id = ?').get(txn.id)
+  if (existing) return res.json({ execution_id: existing.id, status: existing.status, note: 'Execution already entered (idempotent)' })
+
+  const id = nanoid()
+  const baseline = { wad_id: wad.id, entered_at: new Date().toISOString() }
+  db.prepare(
+    `INSERT INTO executions (id, transaction_id, wad_id, status, baseline_json, created_at) VALUES (?, ?, ?, 'ACTIVE', ?, ?)`
+  ).run(id, txn.id, wad.id, JSON.stringify(baseline), new Date().toISOString())
+  setStage(txn.id, 'EXECUTION')
+  writeMemoryEvent(txn.id, 'execution.entered', { execution_id: id, wad_id: wad.id })
+  res.status(201).json({ execution_id: id, status: 'ACTIVE', trading_stage: 'EXECUTION' })
+})
+
+app.post('/v1/executions/:id/milestones', auth, (req, res) => {
+  const execution = db.prepare('SELECT * FROM executions WHERE id = ?').get(req.params.id)
+  if (!execution) return problem(res, 404, 'VALIDATION_FAILED', 'execution not found')
+  const { title, evidence_base64 } = req.body
+  if (!title) return problem(res, 422, 'VALIDATION_FAILED', 'milestone requires a title')
+  const evidenceHash = evidence_base64
+    ? crypto.createHash('sha256').update(Buffer.from(evidence_base64, 'base64')).digest('hex')
+    : null
+  const id = nanoid()
+  db.prepare(
+    `INSERT INTO milestones (id, execution_id, title, status, evidence_hash, created_at) VALUES (?, ?, ?, 'ACCEPTED', ?, ?)`
+  ).run(id, execution.id, title, evidenceHash, new Date().toISOString())
+  db.prepare('UPDATE milestones SET accepted_at = ? WHERE id = ?').run(new Date().toISOString(), id)
+  writeMemoryEvent(execution.transaction_id, 'milestone.submitted', { milestone_id: id, execution_id: execution.id, title })
+  writeMemoryEvent(execution.transaction_id, 'milestone.accepted', { milestone_id: id, evidence_hash: evidenceHash })
+  res.status(201).json({ milestone_id: id, status: 'ACCEPTED', evidence_hash: evidenceHash })
+})
+
+// Exit: requires at least one accepted milestone (minimal completion basis for this slice).
+app.post('/v1/executions/:id/exit', auth, (req, res) => {
+  const execution = db.prepare('SELECT * FROM executions WHERE id = ?').get(req.params.id)
+  if (!execution) return problem(res, 404, 'VALIDATION_FAILED', 'execution not found')
+  const acceptedCount = db.prepare("SELECT COUNT(*) c FROM milestones WHERE execution_id = ? AND status = 'ACCEPTED'").get(execution.id).c
+  if (acceptedCount === 0) {
+    return problem(res, 409, 'GATE_FAILED', 'Exit requires at least one accepted milestone as completion evidence')
+  }
+  db.prepare(`UPDATE executions SET status = 'COMPLETE', completed_at = ? WHERE id = ?`).run(new Date().toISOString(), execution.id)
+  setStage(execution.transaction_id, 'EXECUTION_EXIT')
+  writeMemoryEvent(execution.transaction_id, 'execution.exit', { execution_id: execution.id, accepted_milestones: acceptedCount })
+  res.json({ execution_id: execution.id, status: 'COMPLETE' })
+})
+
+// ============================================================
+// FINALITY — terminal record. Cannot issue while Execution is incomplete (FIN-01).
+// ============================================================
+app.post('/v1/finality-records', auth, (req, res) => {
+  const txn = getTxn(req, res)
+  if (!txn) return
+  const execution = db.prepare("SELECT * FROM executions WHERE transaction_id = ? AND status = 'COMPLETE'").get(txn.id)
+  if (!execution) return problem(res, 409, 'GATE_FAILED', 'Finality requires a completed Execution (Exit) first')
+  const { finality_type } = req.body
+  const type = ['PAYMENT', 'SETTLEMENT', 'HANDOVER_DELIVERY', 'SYNTHETIC', 'OTHER'].includes(finality_type) ? finality_type : 'OTHER'
+  const id = nanoid()
+  db.prepare(
+    `INSERT INTO finality_records (id, transaction_id, execution_id, finality_type, status, created_at) VALUES (?, ?, ?, ?, 'DRAFT', ?)`
+  ).run(id, txn.id, execution.id, type, new Date().toISOString())
+  writeMemoryEvent(txn.id, 'finality.entered', { finality_id: id, finality_type: type })
+  res.status(201).json({ finality_id: id, status: 'DRAFT', finality_type: type })
+})
+
+app.post('/v1/finality-records/:id/issue', auth, (req, res) => {
+  const record = db.prepare('SELECT * FROM finality_records WHERE id = ?').get(req.params.id)
+  if (!record) return problem(res, 404, 'VALIDATION_FAILED', 'finality record not found')
+  if (record.status === 'ISSUED') return res.json({ finality_id: record.id, status: 'ISSUED', canonical_hash: record.canonical_hash })
+
+  const poi = db.prepare('SELECT * FROM pois WHERE transaction_id = ?').get(record.transaction_id)
+  const wad = db.prepare('SELECT * FROM wads WHERE transaction_id = ?').get(record.transaction_id)
+  const execution = db.prepare('SELECT * FROM executions WHERE id = ?').get(record.execution_id)
+  const milestones = db.prepare('SELECT * FROM milestones WHERE execution_id = ?').all(execution.id)
+
+  const certificate = {
+    finality_id: record.id,
+    transaction_id: record.transaction_id,
+    finality_type: record.finality_type,
+    poi_hash: poi.canonical_hash,
+    wad_decision: wad.decision,
+    execution_baseline: JSON.parse(execution.baseline_json),
+    milestones: milestones.map((m) => ({ title: m.title, status: m.status, evidence_hash: m.evidence_hash })),
+    issued_at: new Date().toISOString(),
+  }
+  const canonicalHash = crypto.createHash('sha256').update(JSON.stringify(certificate, Object.keys(certificate).sort())).digest('hex')
+  db.prepare(
+    `UPDATE finality_records SET status = 'ISSUED', canonical_hash = ?, certificate_json = ?, issued_at = ? WHERE id = ?`
+  ).run(canonicalHash, JSON.stringify(certificate), certificate.issued_at, record.id)
+  setStage(record.transaction_id, 'FINALITY')
+  db.prepare("UPDATE transactions SET lifecycle = 'CLOSED' WHERE id = ?").run(record.transaction_id)
+  writeMemoryEvent(record.transaction_id, 'finality.issued', { finality_id: record.id, canonical_hash: canonicalHash })
+  res.json({ finality_id: record.id, status: 'ISSUED', canonical_hash: canonicalHash, certificate })
+})
+
+// ============================================================
+// CDA — Chain of Decision and Action. Readable during the transaction;
+// final/sealed after Finality issues (spec 14.5, FIN-05).
+// ============================================================
+app.get('/v1/cdas/:transactionId', auth, (req, res) => {
+  const txn = getTxn(req, res)
+  if (!txn) return
+  const events = getTimeline(txn.id)
+  const finality = db.prepare("SELECT * FROM finality_records WHERE transaction_id = ? AND status = 'ISSUED'").get(txn.id)
+  res.json({
+    transaction_id: txn.id,
+    sealed: !!finality,
+    sealed_at: finality ? finality.issued_at : null,
+    causal_chain: events.map((e) => ({ event_type: e.event_type, occurred_at: e.occurred_at, event_hash: e.event_hash })),
+    chain_integrity: verifyChain(txn.id),
+    certificate: finality ? JSON.parse(finality.certificate_json) : null,
+  })
+})
+
 // ---- Read models ----
 app.get('/v1/transactions/:transactionId', auth, (req, res) => {
   const txn = getTxn(req, res)

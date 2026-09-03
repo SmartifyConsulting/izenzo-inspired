@@ -16,12 +16,15 @@ async function req(path: string, options: RequestInit = {}) {
     },
   })
   const data = await res.json().catch(() => ({}))
-  if (!res.ok) throw new Error(data.error || `Request failed: ${res.status}`)
+  if (!res.ok) {
+    const err = new Error(data.title || data.error || `Request failed: ${res.status}`) as Error & { data?: unknown }
+    err.data = data
+    throw err
+  }
   return data
 }
 
-export async function ensureSession() {
-  if (token) return token
+export async function newSession() {
   const email = `demo-${Date.now()}@izenzo-diligence.local`
   const data = await req('/auth/signup', {
     method: 'POST',
@@ -29,69 +32,38 @@ export async function ensureSession() {
   })
   token = data.token
   localStorage.setItem('izenzo_demo_token', token!)
+  return { workspace_id: data.workspace_id }
+}
+
+export async function ensureSession() {
+  if (!token) await newSession()
   return token
 }
 
-export async function healthCheck() {
-  return req('/healthz')
-}
+export const healthCheck = () => req('/healthz')
 
-export async function createEntity(payload: {
-  legal_name: string
-  jurisdiction?: string
-  registration_number?: string
-  ubos?: { name: string; ownership_pct: number }[]
-}) {
-  await ensureSession()
-  return req('/entities', { method: 'POST', body: JSON.stringify(payload) })
-}
-
-export async function screenEntity(entityId: string) {
-  await ensureSession()
-  return req(`/entities/${entityId}/screen`, { method: 'POST' })
-}
-
-export async function getEntities() {
-  await ensureSession()
-  return req('/entities')
-}
-
-export async function createMatch(payload: {
-  commodity: string
-  volume_mt: number
-  price_usd: number
-  incoterms: string
-}) {
-  await ensureSession()
-  return req('/match', { method: 'POST', body: JSON.stringify(payload) })
-}
-
-export async function advanceGate(matchId: string, gateIndex: number) {
-  await ensureSession()
-  return req(`/match/${matchId}/gate/${gateIndex}`, { method: 'POST', body: JSON.stringify({}) })
-}
-
-export async function getMatch(matchId: string) {
-  await ensureSession()
-  return req(`/match/${matchId}`)
-}
-
-export async function settleMatch(matchId: string) {
-  await ensureSession()
-  return req(`/match/${matchId}/settle`, { method: 'POST' })
-}
-
-export async function getEvidencePack(matchId: string) {
-  await ensureSession()
-  return req(`/evidence-pack/${matchId}`)
-}
-
-export async function issueCertificate(matchId: string) {
-  await ensureSession()
-  return req('/p3-wad', { method: 'POST', body: JSON.stringify({ match_id: matchId }) })
-}
-
-export async function getAuditLogs() {
-  await ensureSession()
-  return req('/audit-logs')
-}
+export const createBidOffer = (payload: object) => req('/v1/bid-offers', { method: 'POST', body: JSON.stringify(payload) })
+export const createOtherDocument = (payload: object) => req('/v1/other-documents', { method: 'POST', body: JSON.stringify(payload) })
+export const createSocialNewsItem = (payload: object) => req('/v1/social-news-items', { method: 'POST', body: JSON.stringify(payload) })
+export const createSearchRun = (payload: object) => req('/v1/search-runs', { method: 'POST', body: JSON.stringify(payload) })
+export const createAiAnalysis = (payload: object) => req('/v1/ai-analyses', { method: 'POST', body: JSON.stringify(payload) })
+export const createDecisionSession = (payload: object) => req('/v1/decision-sessions', { method: 'POST', body: JSON.stringify(payload) })
+export const generateChoiceSet = (id: string) => req(`/v1/decision-sessions/${id}/generate`, { method: 'POST' })
+export const materialiseCounterparties = (transactionId: string) =>
+  req(`/v1/transactions/${transactionId}/counterparties/materialise`, { method: 'POST' })
+export const createChoice = (transactionId: string, payload: object) =>
+  req(`/v1/transactions/${transactionId}/choices`, { method: 'POST', body: JSON.stringify(payload) })
+export const createIntent = (transactionId: string) =>
+  req(`/v1/transactions/${transactionId}/intent`, { method: 'POST' })
+export const createPoi = (payload: object) => req('/v1/pois', { method: 'POST', body: JSON.stringify(payload) })
+export const sealPoi = (id: string) => req(`/v1/pois/${id}/seal`, { method: 'POST' })
+export const createWad = (payload: object) => req('/v1/wads', { method: 'POST', body: JSON.stringify(payload) })
+export const createExecution = (payload: object) => req('/v1/executions', { method: 'POST', body: JSON.stringify(payload) })
+export const createMilestone = (executionId: string, payload: object) =>
+  req(`/v1/executions/${executionId}/milestones`, { method: 'POST', body: JSON.stringify(payload) })
+export const exitExecution = (executionId: string) => req(`/v1/executions/${executionId}/exit`, { method: 'POST' })
+export const createFinality = (payload: object) => req('/v1/finality-records', { method: 'POST', body: JSON.stringify(payload) })
+export const issueFinality = (id: string) => req(`/v1/finality-records/${id}/issue`, { method: 'POST' })
+export const getCda = (transactionId: string) => req(`/v1/cdas/${transactionId}`)
+export const getLineage = (transactionId: string) => req(`/v1/transactions/${transactionId}/lineage`)
+export const getWallet = (workspaceId: string) => req(`/v1/wallets/${workspaceId}`)
