@@ -205,7 +205,9 @@ app.post('/v1/decision-sessions', auth, (req, res) => {
 
 // Generate/test the ChoiceSet from real, source-supported candidates only.
 app.post('/v1/decision-sessions/:id/generate', auth, (req, res) => {
-  const session = db.prepare('SELECT * FROM decision_sessions WHERE id = ?').get(req.params.id)
+  const session = db.prepare(
+    `SELECT ds.* FROM decision_sessions ds JOIN transactions t ON t.id = ds.transaction_id WHERE ds.id = ? AND t.workspace_id = ?`
+  ).get(req.params.id, req.workspaceId)
   if (!session) return problem(res, 404, 'VALIDATION_FAILED', 'decision session not found')
   const analysis = db.prepare('SELECT * FROM ai_analyses WHERE id = ?').get(session.ai_analysis_id)
   const output = JSON.parse(analysis.output_json)
@@ -316,7 +318,9 @@ app.post('/v1/pois', auth, (req, res) => {
 
 // Seal the POI — immutable from here; concludes Trading.
 app.post('/v1/pois/:id/seal', auth, (req, res) => {
-  const poi = db.prepare('SELECT * FROM pois WHERE id = ?').get(req.params.id)
+  const poi = db.prepare(
+    `SELECT p.* FROM pois p JOIN transactions t ON t.id = p.transaction_id WHERE p.id = ? AND t.workspace_id = ?`
+  ).get(req.params.id, req.workspaceId)
   if (!poi) return problem(res, 404, 'VALIDATION_FAILED', 'POI not found')
   if (poi.status === 'SEALED') return res.json({ poi_id: poi.id, status: 'SEALED', canonical_hash: poi.canonical_hash })
 
@@ -337,55 +341,60 @@ app.post('/v1/pois/:id/seal', auth, (req, res) => {
 // waiver, no conditional approval, no override (spec 11.2, WAD-00..03).
 // ============================================================
 app.post('/v1/wads', auth, async (req, res) => {
-  const txn = getTxn(req, res)
-  if (!txn) return
-  const poi = db.prepare("SELECT * FROM pois WHERE transaction_id = ? AND status = 'SEALED'").get(txn.id)
-  if (!poi) return problem(res, 409, 'STAGE_ORDER_VIOLATION', 'WaD requires a sealed POI first')
+  try {
+    const txn = getTxn(req, res)
+    if (!txn) return
+    const poi = db.prepare("SELECT * FROM pois WHERE transaction_id = ? AND status = 'SEALED'").get(txn.id)
+    if (!poi) return problem(res, 409, 'STAGE_ORDER_VIOLATION', 'WaD requires a sealed POI first')
 
-  let wad = db.prepare('SELECT * FROM wads WHERE transaction_id = ?').get(txn.id)
-  if (!wad) {
-    const tokenEntry = chargeGate(req.workspaceId, txn.id, 'wad', WAD_TOKENS, WAD_USD)
-    const id = nanoid()
-    db.prepare(
-      `INSERT INTO wads (id, transaction_id, poi_id, status, token_entry_id, created_at) VALUES (?, ?, ?, 'PENDING', ?, ?)`
-    ).run(id, txn.id, poi.id, tokenEntry.id, new Date().toISOString())
-    writeMemoryEvent(txn.id, 'token.consumed.wad', { token_entry_id: tokenEntry.id, tokens: WAD_TOKENS, usd: WAD_USD })
-    writeMemoryEvent(txn.id, 'wad.entered', { wad_id: id, poi_id: poi.id })
-    wad = db.prepare('SELECT * FROM wads WHERE id = ?').get(id)
+    let wad = db.prepare('SELECT * FROM wads WHERE transaction_id = ?').get(txn.id)
+    if (!wad) {
+      const tokenEntry = chargeGate(req.workspaceId, txn.id, 'wad', WAD_TOKENS, WAD_USD)
+      const id = nanoid()
+      db.prepare(
+        `INSERT INTO wads (id, transaction_id, poi_id, status, token_entry_id, created_at) VALUES (?, ?, ?, 'PENDING', ?, ?)`
+      ).run(id, txn.id, poi.id, tokenEntry.id, new Date().toISOString())
+      writeMemoryEvent(txn.id, 'token.consumed.wad', { token_entry_id: tokenEntry.id, tokens: WAD_TOKENS, usd: WAD_USD })
+      writeMemoryEvent(txn.id, 'wad.entered', { wad_id: id, poi_id: poi.id })
+      wad = db.prepare('SELECT * FROM wads WHERE id = ?').get(id)
+    }
+
+    // Run real applicable-name sanctions screening against the chosen counterparty.
+    const intent = db.prepare('SELECT * FROM intents WHERE id = ?').get(poi.intent_id)
+    const snapshot = JSON.parse(intent.frozen_snapshot_json)
+    const entityName = snapshot.selected_entity?.name || snapshot.selected_entity?.legal_name || 'Unnamed counterparty'
+    const sanctionsResult = await screenName(entityName)
+
+    const predicates = [
+      { id: 'AUTHORITY', result: 'PASS', note: 'Bid/Offer actor and represented org recorded' },
+      {
+        id: 'SANCTIONS',
+        result: sanctionsResult.status === 'hit' ? 'FAIL' : sanctionsResult.status === 'error' ? 'UNKNOWN' : 'PASS',
+        note: sanctionsResult.source,
+        matches: sanctionsResult.matches,
+      },
+    ]
+    const anyBlocking = predicates.some((p) => p.result === 'FAIL' || p.result === 'UNKNOWN')
+    const decision = anyBlocking ? 'FAILED' : 'PASSED'
+
+    db.prepare(`UPDATE wads SET status = ?, predicates_json = ?, decision = ?, decided_at = ? WHERE id = ?`).run(
+      anyBlocking ? 'PENDING' : 'PASSED', JSON.stringify(predicates), decision, new Date().toISOString(), wad.id
+    )
+    writeMemoryEvent(txn.id, `wad.${decision.toLowerCase()}`, { wad_id: wad.id, predicates })
+    setStage(txn.id, 'WAD')
+
+    res.json({
+      wad_id: wad.id,
+      status: anyBlocking ? 'PENDING' : 'PASSED',
+      decision,
+      token_charge: { tokens: WAD_TOKENS, usd: WAD_USD },
+      predicates,
+      execution_permitted: decision === 'PASSED',
+    })
+  } catch (err) {
+    console.error('WaD screening failed:', err)
+    problem(res, 502, 'PROVIDER_UNAVAILABLE', 'Sanctions screening is temporarily unavailable; WaD remains PENDING, not PASSED')
   }
-
-  // Run real applicable-name sanctions screening against the chosen counterparty.
-  const intent = db.prepare('SELECT * FROM intents WHERE id = ?').get(poi.intent_id)
-  const snapshot = JSON.parse(intent.frozen_snapshot_json)
-  const entityName = snapshot.selected_entity?.name || snapshot.selected_entity?.legal_name || 'Unnamed counterparty'
-  const sanctionsResult = await screenName(entityName)
-
-  const predicates = [
-    { id: 'AUTHORITY', result: 'PASS', note: 'Bid/Offer actor and represented org recorded' },
-    {
-      id: 'SANCTIONS',
-      result: sanctionsResult.status === 'hit' ? 'FAIL' : sanctionsResult.status === 'error' ? 'UNKNOWN' : 'PASS',
-      note: sanctionsResult.source,
-      matches: sanctionsResult.matches,
-    },
-  ]
-  const anyBlocking = predicates.some((p) => p.result === 'FAIL' || p.result === 'UNKNOWN')
-  const decision = anyBlocking ? 'FAILED' : 'PASSED'
-
-  db.prepare(`UPDATE wads SET status = ?, predicates_json = ?, decision = ?, decided_at = ? WHERE id = ?`).run(
-    anyBlocking ? 'PENDING' : 'PASSED', JSON.stringify(predicates), decision, new Date().toISOString(), wad.id
-  )
-  writeMemoryEvent(txn.id, `wad.${decision.toLowerCase()}`, { wad_id: wad.id, predicates })
-  setStage(txn.id, 'WAD')
-
-  res.json({
-    wad_id: wad.id,
-    status: anyBlocking ? 'PENDING' : 'PASSED',
-    decision,
-    token_charge: { tokens: WAD_TOKENS, usd: WAD_USD },
-    predicates,
-    execution_permitted: decision === 'PASSED',
-  })
 })
 
 // ============================================================
@@ -415,7 +424,9 @@ app.post('/v1/executions', auth, (req, res) => {
 })
 
 app.post('/v1/executions/:id/milestones', auth, (req, res) => {
-  const execution = db.prepare('SELECT * FROM executions WHERE id = ?').get(req.params.id)
+  const execution = db.prepare(
+    `SELECT e.* FROM executions e JOIN transactions t ON t.id = e.transaction_id WHERE e.id = ? AND t.workspace_id = ?`
+  ).get(req.params.id, req.workspaceId)
   if (!execution) return problem(res, 404, 'VALIDATION_FAILED', 'execution not found')
   const { title, evidence_base64 } = req.body
   if (!title) return problem(res, 422, 'VALIDATION_FAILED', 'milestone requires a title')
@@ -434,7 +445,9 @@ app.post('/v1/executions/:id/milestones', auth, (req, res) => {
 
 // Exit: requires at least one accepted milestone (minimal completion basis for this slice).
 app.post('/v1/executions/:id/exit', auth, (req, res) => {
-  const execution = db.prepare('SELECT * FROM executions WHERE id = ?').get(req.params.id)
+  const execution = db.prepare(
+    `SELECT e.* FROM executions e JOIN transactions t ON t.id = e.transaction_id WHERE e.id = ? AND t.workspace_id = ?`
+  ).get(req.params.id, req.workspaceId)
   if (!execution) return problem(res, 404, 'VALIDATION_FAILED', 'execution not found')
   const acceptedCount = db.prepare("SELECT COUNT(*) c FROM milestones WHERE execution_id = ? AND status = 'ACCEPTED'").get(execution.id).c
   if (acceptedCount === 0) {
@@ -465,7 +478,9 @@ app.post('/v1/finality-records', auth, (req, res) => {
 })
 
 app.post('/v1/finality-records/:id/issue', auth, (req, res) => {
-  const record = db.prepare('SELECT * FROM finality_records WHERE id = ?').get(req.params.id)
+  const record = db.prepare(
+    `SELECT f.* FROM finality_records f JOIN transactions t ON t.id = f.transaction_id WHERE f.id = ? AND t.workspace_id = ?`
+  ).get(req.params.id, req.workspaceId)
   if (!record) return problem(res, 404, 'VALIDATION_FAILED', 'finality record not found')
   if (record.status === 'ISSUED') return res.json({ finality_id: record.id, status: 'ISSUED', canonical_hash: record.canonical_hash })
 
@@ -568,5 +583,23 @@ app.get('/audit-logs', auth, (req, res) => {
   res.json(rows.map((r) => ({ ...r, detail_json: JSON.parse(r.detail_json) })))
 })
 
+// Catch-all: any route that isn't defined returns a stable 404, not an HTML default page.
+app.use((req, res) => {
+  problem(res, 404, 'VALIDATION_FAILED', `No route for ${req.method} ${req.path}`)
+})
+
+// Global error handler: any thrown/sync error in a route lands here instead of
+// crashing the process or leaking a stack trace mid-demo.
+app.use((err, req, res, _next) => {
+  console.error('Unhandled route error:', err)
+  if (res.headersSent) return
+  problem(res, 500, 'INTERNAL_ERROR', 'Unexpected server error')
+})
+
+// Never let an unexpected async rejection or exception kill the demo process.
+process.on('unhandledRejection', (err) => console.error('Unhandled rejection:', err))
+process.on('uncaughtException', (err) => console.error('Uncaught exception:', err))
+
 const PORT = process.env.PORT || 4000
 app.listen(PORT, () => console.log(`Izenzo spine backend listening on :${PORT}`))
+
