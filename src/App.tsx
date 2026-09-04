@@ -16,6 +16,7 @@ import Trust from './pages/Trust'
 import Status from './pages/Status'
 import LiveDemo from './pages/LiveDemo'
 import Checkout from './pages/Checkout'
+import Dashboard from './pages/Dashboard'
 
 export default function App() {
   return (
@@ -45,6 +46,7 @@ export default function App() {
         <Route path="/status" element={<Status />} />
         <Route path="/live-demo" element={<LiveDemo />} />
         <Route path="/checkout/:sessionId" element={<Checkout />} />
+        <Route path="/dashboard" element={<Dashboard />} />
       </Routes>
     </BrowserRouter>
   )

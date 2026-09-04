@@ -610,6 +610,29 @@ app.get('/v1/cdas/:transactionId', auth, (req, res) => {
 })
 
 // ---- Read models ----
+app.get('/v1/transactions', auth, (req, res) => {
+  const rows = db
+    .prepare('SELECT * FROM transactions WHERE workspace_id = ? ORDER BY created_at DESC')
+    .all(req.workspaceId)
+  const withSummary = rows.map((t) => {
+    const bidOffer = db.prepare('SELECT subject_description, commercial_json FROM bid_offers WHERE transaction_id = ?').get(t.id)
+    const poi = db.prepare('SELECT status FROM pois WHERE transaction_id = ?').get(t.id)
+    const wad = db.prepare('SELECT decision FROM wads WHERE transaction_id = ?').get(t.id)
+    const finality = db.prepare('SELECT status FROM finality_records WHERE transaction_id = ?').get(t.id)
+    return {
+      transaction_id: t.id,
+      lifecycle: t.lifecycle,
+      trading_stage: t.trading_stage,
+      subject: bidOffer?.subject_description || null,
+      poi_status: poi?.status || null,
+      wad_decision: wad?.decision || null,
+      finality_status: finality?.status || null,
+      created_at: t.created_at,
+    }
+  })
+  res.json({ transactions: withSummary })
+})
+
 app.get('/v1/transactions/:transactionId', auth, (req, res) => {
   const txn = getTxn(req, res)
   if (!txn) return

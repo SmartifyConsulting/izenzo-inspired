@@ -24,8 +24,14 @@ export default function LiveDemo() {
     setCertificate(null)
     setCda(null)
     try {
-      await api.newSession()
-      pushLog('SESSION', 'New workspace provisioned', true, 'fresh session, no shared state with prior runs')
+      const wasLoggedIn = api.isLoggedIn()
+      await api.ensureSession()
+      pushLog(
+        'SESSION',
+        wasLoggedIn ? 'Using your signed-in workspace' : 'New demo workspace provisioned',
+        true,
+        wasLoggedIn ? 'this transaction will appear on your dashboard' : 'anonymous session, sign in to keep a persistent dashboard'
+      )
 
       const bidOffer = await api.createBidOffer({
         actor_person: 'Jane Trader',

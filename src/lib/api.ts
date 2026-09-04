@@ -104,3 +104,5 @@ export const issueFinality = (id: string) => req(`/v1/finality-records/${id}/iss
 export const getCda = (transactionId: string) => req(`/v1/cdas/${transactionId}`)
 export const getLineage = (transactionId: string) => req(`/v1/transactions/${transactionId}/lineage`)
 export const getWallet = (workspaceId: string) => req(`/v1/wallets/${workspaceId}`)
+export const listTransactions = () => req('/v1/transactions')
+export const getAuditLogs = () => req('/audit-logs')

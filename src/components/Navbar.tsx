@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { ChevronDown } from 'lucide-react'
 import { Logo } from './Logo'
+import { isLoggedIn } from '../lib/api'
 
 type Item = { label: string; href: string; desc: string }
 
@@ -72,15 +73,26 @@ export function Navbar() {
           </nav>
         </div>
         <div className="flex items-center gap-3">
-          <Link to="/auth" className="text-sm font-medium text-muted-foreground hover:text-foreground px-3 h-10 flex items-center">
-            Log In
-          </Link>
-          <Link
-            to="/auth"
-            className="inline-flex items-center h-10 px-5 rounded-md bg-emerald-950 text-white text-sm font-semibold hover:-translate-y-0.5 transition-transform"
-          >
-            Create Account
-          </Link>
+          {isLoggedIn() ? (
+            <Link
+              to="/dashboard"
+              className="inline-flex items-center h-10 px-5 rounded-md bg-emerald-950 text-white text-sm font-semibold hover:-translate-y-0.5 transition-transform"
+            >
+              Dashboard
+            </Link>
+          ) : (
+            <>
+              <Link to="/auth" className="text-sm font-medium text-muted-foreground hover:text-foreground px-3 h-10 flex items-center">
+                Log In
+              </Link>
+              <Link
+                to="/auth"
+                className="inline-flex items-center h-10 px-5 rounded-md bg-emerald-950 text-white text-sm font-semibold hover:-translate-y-0.5 transition-transform"
+              >
+                Create Account
+              </Link>
+            </>
+          )}
         </div>
       </div>
     </header>
